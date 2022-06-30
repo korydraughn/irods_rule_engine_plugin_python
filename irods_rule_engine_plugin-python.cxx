@@ -348,9 +348,9 @@ irods::error start(irods::default_re_ctx&, const std::string& _instance_name)
 #else
     void *p = dlopen("libpython3.6m.so.1.0", RTLD_LAZY | RTLD_GLOBAL); // Kludge for bionic; proper solution forthcoming.
 #endif
-    rodsLog(LOG_NOTICE, "DWM - dlopen returned: [%p]", p);
+    rodsLog(LOG_DEBUG, "dlopen returned: [%p]", p);
     if (!p) {
-       rodsLog(LOG_NOTICE, "    - dlerror gives : [%s]", dlerror());
+       rodsLog(LOG_DEBUG, "dlerror gives : [%s]", dlerror());
     }
 
     try {
