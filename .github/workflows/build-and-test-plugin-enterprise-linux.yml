@@ -1,0 +1,149 @@
+name: build-and-test-plugin-enterprise-linux
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: Build - ${{ matrix.container }}, ${{ matrix.irods_package_version }}
+
+    strategy:
+      matrix:
+        include:
+          # EL9
+          - container: rockylinux/rockylinux:9
+            irods_package_version: 5.0.0-0.el9
+            upload_artifact_suffix: rockylinux_9-5.0.0-0
+          - container: rockylinux/rockylinux:9
+            irods_package_version: 5.0.2-0.el9
+            upload_artifact_suffix: rockylinux_9-5.0.2-0
+          # EL10
+          - container: rockylinux/rockylinux:10
+            irods_package_version: 5.0.2-0.el10
+            upload_artifact_suffix: rockylinux_10-5.0.2-0
+
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install prerequisite packages
+        run: |
+          dnf update -y
+          dnf install -y \
+            dnf-plugins-core \
+            epel-release \
+            gcc-c++ \
+            git \
+            rpm-build \
+            sudo \
+            wget
+          dnf install -y \
+            cmake \
+            python3-devel \
+            python3-distro \
+            python3-packaging \
+            python3-pip
+
+      - name: Set up iRODS externals package repository
+        run: |
+          rpm --import https://packages.irods.org/irods-signing-key.asc
+          wget -qO - https://packages.irods.org/renci-irods.yum.repo | tee /etc/yum.repos.d/renci-irods.yum.repo
+
+      - name: Install iRODS development packages
+        run: |
+          dnf update -y
+          dnf install -y \
+            irods-devel-${{ matrix.irods_package_version }} \
+            irods-runtime-${{ matrix.irods_package_version }}
+
+      - name: Install python iRODS CI utilities
+        shell: bash
+        run: |
+            python3 -m pip install git+https://github.com/irods/irods_python_ci_utilities.git@main
+
+      - name: Build and package
+        run: |
+          mkdir _build
+          python3 irods_consortium_continuous_integration_build_hook.py --build_directory _build
+
+      - name: List contents of build directory
+        run: ls -l _build
+
+      - name: Upload build output for dependent jobs
+        uses: actions/upload-artifact@v6
+        with:
+          name: build_output-${{ matrix.upload_artifact_suffix }}
+          path: _build
+          retention-days: 1
+          overwrite: true
+
+  run_tests:
+    needs: build
+
+    name: Run tests - ${{ matrix.testing_env_os }}, ${{ matrix.irods_package_version }}
+
+    strategy:
+      matrix:
+        include:
+          # EL9
+          - testing_env_os: rockylinux-9
+            irods_package_version: 5.0.0-0.el9
+            plugin_package_dir: 'Rocky linux_9'
+            download_artifact_suffix: rockylinux_9-5.0.0-0
+          - testing_env_os: rockylinux-9
+            irods_package_version: 5.0.2-0.el9
+            plugin_package_dir: 'Rocky linux_9'
+            download_artifact_suffix: rockylinux_9-5.0.2-0
+          # EL10
+          - testing_env_os: rockylinux-10
+            irods_package_version: 5.0.2-0.el10
+            plugin_package_dir: 'Rocky linux_10'
+            download_artifact_suffix: rockylinux_10-5.0.2-0
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up python for iRODS testing environment
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.8'
+
+      - name: Download build output
+        uses: actions/download-artifact@v7
+        with:
+          name: build_output-${{ matrix.download_artifact_suffix }}
+          path: ${{ matrix.plugin_package_dir }}
+
+      - name: Set up docker compose
+        uses: docker/setup-compose-action@v1
+
+      - name: Set up iRODS testing environment
+        run: |
+          #git clone https://github.com/irods/irods_testing_environment
+          git clone https://github.com/korydraughn/irods_testing_environment
+          cd irods_testing_environment
+          git checkout python_ci_utils_dnf.m
+          python3 -m venv venv_testing_env
+          . venv_testing_env/bin/activate
+          python --version
+          pip install docker-compose GitPython
+          pip install docker'<7' requests==2.26.0
+          pip freeze
+
+      - name: Run tests
+        run: |
+          ls -l "${{ matrix.plugin_package_dir }}"
+          cd irods_testing_environment
+          . venv_testing_env/bin/activate
+          python run_plugin_tests.py \
+            "${GITHUB_REPOSITORY#${GITHUB_REPOSITORY_OWNER}/}" \
+            --project-directory projects/${{ matrix.testing_env_os }}/${{ matrix.testing_env_os }}-postgres-16 \
+            --irods-package-version ${{ matrix.irods_package_version }} \
+            --plugin-package-directory .. \
+            --discard-logs \
+            -vv

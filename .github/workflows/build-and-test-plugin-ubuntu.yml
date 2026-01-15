@@ -1,0 +1,168 @@
+name: build-and-test-plugin-ubuntu
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: Build - ${{ matrix.container }}, ${{ matrix.irods_package_version }}
+
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04
+          - container: ubuntu:22.04
+            irods_package_version: 5.0.0-0
+            upload_artifact_suffix: ubuntu_22.04-5.0.0-0
+          - container: ubuntu:22.04
+            irods_package_version: 5.0.2-0
+            upload_artifact_suffix: ubuntu_22.04-5.0.2-0
+          # Ubuntu 24.04
+          - container: ubuntu:24.04
+            irods_package_version: 5.0.0-0
+            upload_artifact_suffix: ubuntu_24.04-5.0.0-0
+          - container: ubuntu:24.04
+            irods_package_version: 5.0.2-0
+            upload_artifact_suffix: ubuntu_24.04-5.0.2-0
+
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install prerequisite packages
+        run: |
+          apt-get update -qq
+          apt-get install -qq \
+            build-essential \
+            cmake \
+            git \
+            gnupg \
+            lsb-release \
+            python3-distro \
+            python3-packaging \
+            python3-pip \
+            python3-setuptools \
+            wget
+
+      - name: Set up iRODS externals package repository
+        run: |
+          mkdir -p /etc/apt/keyrings
+          wget -qO - https://packages.irods.org/irods-signing-key.asc | \
+            gpg \
+              --no-options \
+              --no-default-keyring \
+              --no-auto-check-trustdb \
+              --homedir /dev/null \
+              --no-keyring \
+              --import-options import-export \
+              --output /etc/apt/keyrings/renci-irods-archive-keyring.pgp \
+              --import
+          echo "deb [signed-by=/etc/apt/keyrings/renci-irods-archive-keyring.pgp arch=amd64] https://packages.irods.org/apt/ $(lsb_release -sc) main" | \
+            tee /etc/apt/sources.list.d/renci-irods.list
+
+      - name: Install iRODS development packages
+        run: |
+          apt-get update -qq
+
+          codename=$(lsb_release -sc)
+          apt-get install -qq \
+            irods-dev=${{ matrix.irods_package_version }}~${codename} \
+            irods-runtime=${{ matrix.irods_package_version }}~${codename}
+
+      - name: Install python iRODS CI utilities
+        shell: bash
+        run: |
+          if [[ "${{ matrix.container }}" == "ubuntu:24.04" ]]; then
+            python3 -m pip install --break-system-packages git+https://github.com/irods/irods_python_ci_utilities.git@main
+          else
+            python3 -m pip install git+https://github.com/irods/irods_python_ci_utilities.git@main
+          fi
+
+      - name: Build and package
+        run: |
+          mkdir _build
+          python3 irods_consortium_continuous_integration_build_hook.py --build_directory _build
+
+      - name: List contents of build directory
+        run: ls -l _build
+
+      - name: Upload build output for dependent jobs
+        uses: actions/upload-artifact@v6
+        with:
+          name: build_output-${{ matrix.upload_artifact_suffix }}
+          path: _build
+          retention-days: 1
+          overwrite: true
+
+  run_tests:
+    needs: build
+
+    name: Run tests - ${{ matrix.testing_env_os }}, ${{ matrix.irods_package_version }}
+
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04
+          - testing_env_os: ubuntu-22.04
+            irods_package_version: 5.0.0-0~jammy
+            plugin_package_dir: Ubuntu_22
+            download_artifact_suffix: ubuntu_22.04-5.0.0-0
+          - testing_env_os: ubuntu-22.04
+            irods_package_version: 5.0.2-0~jammy
+            plugin_package_dir: Ubuntu_22
+            download_artifact_suffix: ubuntu_22.04-5.0.2-0
+          # Ubuntu 24.04
+          - testing_env_os: ubuntu-24.04
+            irods_package_version: 5.0.0-0~noble
+            plugin_package_dir: Ubuntu_24
+            download_artifact_suffix: ubuntu_24.04-5.0.0-0
+          - testing_env_os: ubuntu-24.04
+            irods_package_version: 5.0.2-0~noble
+            plugin_package_dir: Ubuntu_24
+            download_artifact_suffix: ubuntu_24.04-5.0.2-0
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up python for iRODS testing environment
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.8'
+
+      - name: Download build output
+        uses: actions/download-artifact@v7
+        with:
+          name: build_output-${{ matrix.download_artifact_suffix }}
+          path: ${{ matrix.plugin_package_dir }}
+
+      - name: Set up docker compose
+        uses: docker/setup-compose-action@v1
+
+      - name: Set up iRODS testing environment
+        run: |
+          git clone https://github.com/irods/irods_testing_environment
+          cd irods_testing_environment
+          python3 -m venv venv_testing_env
+          . venv_testing_env/bin/activate
+          python --version
+          pip install docker-compose GitPython
+          pip install docker'<7' requests==2.26.0
+          pip freeze
+
+      - name: Run tests
+        run: |
+          ls -l "${{ matrix.plugin_package_dir }}"
+          cd irods_testing_environment
+          . venv_testing_env/bin/activate
+          python run_plugin_tests.py \
+            "${GITHUB_REPOSITORY#${GITHUB_REPOSITORY_OWNER}/}" \
+            --project-directory projects/${{ matrix.testing_env_os }}/${{ matrix.testing_env_os }}-postgres-16 \
+            --irods-package-version ${{ matrix.irods_package_version }} \
+            --plugin-package-directory .. \
+            --discard-logs \
+            -vv
